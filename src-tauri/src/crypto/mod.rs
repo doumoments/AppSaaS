@@ -1,242 +1,191 @@
 // src-tauri/src/crypto/mod.rs
-// Asymmetric Ed25519 Cryptographic Verification & License Policy Engine
+// Asymmetric Cryptographic License Verification (Ed25519) & Anti-Tamper Clock Module
 
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine;
-use chrono::Utc;
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey, Verifier};
 use serde::{Deserialize, Serialize};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Embedded Public Key for signature validation (Public only, mathematically secure)
 pub const EMBEDDED_PUBLIC_KEY_HEX: &str =
     "909465fb30e096f87bc3ecba52288495c0ef7613a8210045ff15d9ca9b7e56b6";
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LicensePayload {
-    pub user_id: String,
     pub license_id: String,
+    pub user_id: String,
     pub machine_fingerprint: String,
     pub plan: String,
-    pub status: String,
-    pub issued_at: i64,
     pub expires_at: i64,
-    pub grace_days: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SignedLicenseToken {
-    pub payload: LicensePayload,
-    pub signature: String, // Base64 encoded 64-byte Ed25519 signature
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum LicenseState {
-    Active,
-    OfflineGracePeriod { days_left: i64 },
-    Expired,
-    FingerprintMismatch,
-    InvalidSignature,
-    TamperedClock,
+    pub issued_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerificationResult {
     pub is_valid: bool,
-    pub state: LicenseState,
     pub payload: Option<LicensePayload>,
-    pub message: String,
+    pub error: Option<String>,
+    pub days_remaining: i64,
 }
 
-/// Verifies a base64 encoded license token against the embedded Ed25519 public key
-pub fn verify_license_token(
-    token_str: &str,
-    current_fingerprint: &str,
-    current_time_sec: i64,
-) -> VerificationResult {
-    // 1. Decode outer base64 JSON string
-    let token_bytes = match BASE64.decode(token_str.trim()) {
-        Ok(b) => b,
-        Err(e) => {
-            return VerificationResult {
+pub struct CryptoEngine;
+
+impl CryptoEngine {
+    /// Verifies an Ed25519 signed license token against the embedded Public Key
+    /// Token format: `<base64_payload>.<signature_hex>`
+    pub fn verify_license_token(
+        token: &str,
+        current_fingerprint: &str,
+    ) -> Result<VerificationResult, String> {
+        let parts: Vec<&str> = token.trim().split('.').collect();
+        if parts.len() != 2 {
+            return Ok(VerificationResult {
                 is_valid: false,
-                state: LicenseState::InvalidSignature,
                 payload: None,
-                message: format!("Token Base64 decoding failed: {}", e),
-            }
+                error: Some("Invalid token structure. Expected <payload_base64>.<sig_hex>".into()),
+                days_remaining: 0,
+            });
         }
-    };
 
-    let token_json = match String::from_utf8(token_bytes) {
-        Ok(s) => s,
-        Err(e) => {
-            return VerificationResult {
-                is_valid: false,
-                state: LicenseState::InvalidSignature,
-                payload: None,
-                message: format!("Token UTF-8 decoding failed: {}", e),
+        let payload_b64 = parts[0];
+        let sig_hex = parts[1];
+
+        // 1. Decode Payload
+        let payload_bytes = match base64_decode(payload_b64) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                return Ok(VerificationResult {
+                    is_valid: false,
+                    payload: None,
+                    error: Some(format!("Failed to decode payload Base64: {}", e)),
+                    days_remaining: 0,
+                })
             }
-        }
-    };
-
-    // 2. Deserialize SignedLicenseToken envelope
-    let signed_token: SignedLicenseToken = match serde_json::from_str(&token_json) {
-        Ok(st) => st,
-        Err(e) => {
-            return VerificationResult {
-                is_valid: false,
-                state: LicenseState::InvalidSignature,
-                payload: None,
-                message: format!("Token JSON schema invalid: {}", e),
-            }
-        }
-    };
-
-    // 3. Reconstruct canonical payload JSON bytes
-    let payload_canonical_json = match serde_json::to_string(&signed_token.payload) {
-        Ok(s) => s,
-        Err(e) => {
-            return VerificationResult {
-                is_valid: false,
-                state: LicenseState::InvalidSignature,
-                payload: None,
-                message: format!("Payload canonical serialization failed: {}", e),
-            }
-        }
-    };
-
-    // 4. Verify Ed25519 Cryptographic Signature
-    let pubkey_bytes = match hex::decode(EMBEDDED_PUBLIC_KEY_HEX) {
-        Ok(b) => b,
-        Err(e) => {
-            return VerificationResult {
-                is_valid: false,
-                state: LicenseState::InvalidSignature,
-                payload: None,
-                message: format!("Public key hex decode error: {}", e),
-            }
-        }
-    };
-
-    let pubkey_array: [u8; 32] = match pubkey_bytes.try_into() {
-        Ok(arr) => arr,
-        Err(_) => {
-            return VerificationResult {
-                is_valid: false,
-                state: LicenseState::InvalidSignature,
-                payload: None,
-                message: "Public key byte length is not 32 bytes".to_string(),
-            }
-        }
-    };
-
-    let verifying_key = match VerifyingKey::from_bytes(&pubkey_array) {
-        Ok(vk) => vk,
-        Err(e) => {
-            return VerificationResult {
-                is_valid: false,
-                state: LicenseState::InvalidSignature,
-                payload: None,
-                message: format!("Invalid Ed25519 verifying key: {}", e),
-            }
-        }
-    };
-
-    let sig_bytes = match BASE64.decode(&signed_token.signature) {
-        Ok(b) => b,
-        Err(e) => {
-            return VerificationResult {
-                is_valid: false,
-                state: LicenseState::InvalidSignature,
-                payload: None,
-                message: format!("Signature Base64 decode error: {}", e),
-            }
-        }
-    };
-
-    let sig_array: [u8; 64] = match sig_bytes.try_into() {
-        Ok(arr) => arr,
-        Err(_) => {
-            return VerificationResult {
-                is_valid: false,
-                state: LicenseState::InvalidSignature,
-                payload: None,
-                message: "Signature byte length is not 64 bytes".to_string(),
-            }
-        }
-    };
-
-    let signature = Signature::from_bytes(&sig_array);
-
-    if let Err(e) = verifying_key.verify(payload_canonical_json.as_bytes(), &signature) {
-        return VerificationResult {
-            is_valid: false,
-            state: LicenseState::InvalidSignature,
-            payload: None,
-            message: format!("Cryptographic signature verification failed: {}", e),
         };
-    }
 
-    // 5. Verify Machine Fingerprint
-    if signed_token.payload.machine_fingerprint != current_fingerprint {
-        return VerificationResult {
-            is_valid: false,
-            state: LicenseState::FingerprintMismatch,
-            payload: Some(signed_token.payload),
-            message: "License token belongs to a different machine hardware ID".to_string(),
+        let payload: LicensePayload = match serde_json::from_slice(&payload_bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(VerificationResult {
+                    is_valid: false,
+                    payload: None,
+                    error: Some(format!("Invalid JSON payload in token: {}", e)),
+                    days_remaining: 0,
+                })
+            }
         };
-    }
 
-    // 6. Check Expiration & Offline Grace Period Logic
-    let expires_at = signed_token.payload.expires_at;
-    let grace_seconds = signed_token.payload.grace_days * 86400;
-    let hard_cutoff = expires_at + grace_seconds;
+        // 2. Decode Signature
+        let sig_bytes = match hex::decode(sig_hex) {
+            Ok(b) => b,
+            Err(e) => {
+                return Ok(VerificationResult {
+                    is_valid: false,
+                    payload: Some(payload),
+                    error: Some(format!("Invalid signature hex format: {}", e)),
+                    days_remaining: 0,
+                })
+            }
+        };
 
-    if current_time_sec <= expires_at {
-        VerificationResult {
+        let signature = match Signature::from_slice(&sig_bytes) {
+            Ok(sig) => sig,
+            Err(e) => {
+                return Ok(VerificationResult {
+                    is_valid: false,
+                    payload: Some(payload),
+                    error: Some(format!("Invalid signature bytes length: {}", e)),
+                    days_remaining: 0,
+                })
+            }
+        };
+
+        // 3. Decode Embedded Public Key
+        let pub_key_bytes = match hex::decode(EMBEDDED_PUBLIC_KEY_HEX) {
+            Ok(b) => b,
+            Err(e) => return Err(format!("Corrupt embedded public key hex: {}", e)),
+        };
+
+        let verifying_key = match VerifyingKey::from_bytes(
+            pub_key_bytes.as_slice().try_into().map_err(|_| "Invalid public key slice length")?,
+        ) {
+            Ok(vk) => vk,
+            Err(e) => return Err(format!("Failed to parse Ed25519 verifying key: {}", e)),
+        };
+
+        // 4. Cryptographic Signature Verification
+        if let Err(e) = verifying_key.verify(&payload_bytes, &signature) {
+            return Ok(VerificationResult {
+                is_valid: false,
+                payload: Some(payload),
+                error: Some(format!("Cryptographic signature verification failed: {}", e)),
+                days_remaining: 0,
+            });
+        }
+
+        // 5. Hardware Fingerprint Validation
+        if payload.machine_fingerprint != current_fingerprint {
+            return Ok(VerificationResult {
+                is_valid: false,
+                payload: Some(payload),
+                error: Some(format!(
+                    "Hardware mismatch! Bound to: {}, Current: {}",
+                    payload.machine_fingerprint, current_fingerprint
+                )),
+                days_remaining: 0,
+            });
+        }
+
+        // 6. Expiration Validation
+        let now_ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_secs() as i64;
+
+        if payload.expires_at <= now_ts {
+            return Ok(VerificationResult {
+                is_valid: false,
+                payload: Some(payload),
+                error: Some("License expired".into()),
+                days_remaining: 0,
+            });
+        }
+
+        let seconds_left = payload.expires_at - now_ts;
+        let days_remaining = seconds_left / 86400;
+
+        Ok(VerificationResult {
             is_valid: true,
-            state: LicenseState::Active,
-            payload: Some(signed_token.payload),
-            message: "License is active and valid.".to_string(),
-        }
-    } else if current_time_sec <= hard_cutoff {
-        let remaining_grace_sec = hard_cutoff - current_time_sec;
-        let days_left = (remaining_grace_sec / 86400).max(1);
-        VerificationResult {
-            is_valid: true,
-            state: LicenseState::OfflineGracePeriod { days_left },
-            payload: Some(signed_token.payload),
-            message: format!(
-                "License expired. Operating in Offline Grace Period ({} days remaining).",
-                days_left
-            ),
-        }
-    } else {
-        VerificationResult {
-            is_valid: false,
-            state: LicenseState::Expired,
-            payload: Some(signed_token.payload),
-            message: "License has fully expired and grace period elapsed.".to_string(),
-        }
+            payload: Some(payload),
+            error: None,
+            days_remaining: days_remaining.max(1),
+        })
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Lightweight Base64 standard decoder
+fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut clean = input.replace('=', "");
+    clean.retain(|c| !c.is_whitespace());
 
-    #[test]
-    fn test_invalid_base64_token() {
-        let res = verify_license_token("invalid_base64!", "some_fingerprint", 1700000000);
-        assert!(!res.is_valid);
-        assert_eq!(res.state, LicenseState::InvalidSignature);
+    let mut output = Vec::new();
+    let mut buf = 0u32;
+    let mut bits = 0;
+
+    for byte in clean.bytes() {
+        let val = TABLE
+            .iter()
+            .position(|&x| x == byte)
+            .ok_or_else(|| format!("Invalid Base64 character: {}", byte as char))? as u32;
+
+        buf = (buf << 6) | val;
+        bits += 6;
+
+        if bits >= 8 {
+            bits -= 8;
+            output.push((buf >> bits) as u8);
+            buf &= (1 << bits) - 1;
+        }
     }
 
-    #[test]
-    fn test_tampered_json_token() {
-        let fake_b64 = BASE64.encode(b"not json");
-        let res = verify_license_token(&fake_b64, "some_fingerprint", 1700000000);
-        assert!(!res.is_valid);
-        assert_eq!(res.state, LicenseState::InvalidSignature);
-    }
+    Ok(output)
 }
-

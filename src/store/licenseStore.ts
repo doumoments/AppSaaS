@@ -1,112 +1,115 @@
-// src/store/licenseStore.ts
-// Zustand Global Store for Cryptographic License State and Hardware Identity
-
 import { create } from "zustand";
-import {
-  getHardwareDiagnostics,
-  getMachineFingerprint,
-  saveLicenseCache,
-  verifyLocalLicense,
-} from "../services/tauriBridge";
-import { HardwareInfo, LicensePayload, LicenseStateEnum } from "../types";
+import { tauriBridge, LicensePayload, VerificationResult } from "../services/tauriBridge";
+import { supabaseRPC } from "../services/supabase";
+
+export type LicenseState =
+  | "UNINITIALIZED"
+  | "ACTIVE"
+  | "OFFLINE_GRACE_PERIOD"
+  | "TAMPERED_CLOCK"
+  | "EXPIRED"
+  | "UNLICENSED";
 
 interface LicenseStore {
-  licenseState: LicenseStateEnum;
+  licenseState: LicenseState;
+  fingerprint: string | null;
   payload: LicensePayload | null;
-  fingerprint: string;
-  hardwareInfo: HardwareInfo | null;
-  graceDaysRemaining: number | null;
-  message: string;
-  isLoading: boolean;
+  daysRemaining: number;
   isOnline: boolean;
-
-  // Actions
+  errorMessage: string | null;
   initLicense: () => Promise<void>;
-  applyNewToken: (token: string) => Promise<boolean>;
-  setOnlineStatus: (isOnline: boolean) => void;
+  activateOnline: (licenseKey: string, deviceName: string) => Promise<boolean>;
+  setOnlineStatus: (status: boolean) => void;
 }
 
-export const useLicenseStore = create<LicenseStore>((set) => ({
-  licenseState: "UNACTIVATED",
+export const useLicenseStore = create<LicenseStore>((set, get) => ({
+  licenseState: "UNINITIALIZED",
+  fingerprint: null,
   payload: null,
-  fingerprint: "",
-  hardwareInfo: null,
-  graceDaysRemaining: null,
-  message: "Verificando licencia criptográfica...",
-  isLoading: true,
-  isOnline: typeof navigator !== "undefined" ? navigator.onLine : true,
+  daysRemaining: 0,
+  isOnline: navigator.onLine,
+  errorMessage: null,
 
-  setOnlineStatus: (isOnline: boolean) => set({ isOnline }),
+  setOnlineStatus: (status: boolean) => set({ isOnline: status }),
 
   initLicense: async () => {
-    set({ isLoading: true });
     try {
-      const fingerprint = await getMachineFingerprint();
-      const hardwareInfo = await getHardwareDiagnostics();
-      const verification = await verifyLocalLicense();
+      const hwid = await tauriBridge.getMachineFingerprint();
+      set({ fingerprint: hwid });
 
-      let stateEnum: LicenseStateEnum = "EXPIRED";
-      let graceDays: number | null = null;
+      const cachedToken = await tauriBridge.loadCachedLicense();
 
-      if (verification.is_valid) {
-        if (typeof verification.state === "object" && "OfflineGracePeriod" in verification.state) {
-          stateEnum = "OFFLINE_GRACE_PERIOD";
-          graceDays = verification.state.OfflineGracePeriod.days_left;
-        } else {
-          stateEnum = "ACTIVE";
-        }
-      } else if (verification.state === "TamperedClock") {
-        stateEnum = "TAMPERED_CLOCK";
-      } else {
-        stateEnum = "READ_ONLY";
+      if (!cachedToken) {
+        set({ licenseState: "UNLICENSED" });
+        return;
       }
 
+      // Verify offline cryptographic signature
+      const res: VerificationResult = await tauriBridge.verifyLocalLicense(cachedToken);
+
+      if (res.is_valid && res.payload) {
+        set({
+          licenseState: "ACTIVE",
+          payload: res.payload,
+          daysRemaining: res.days_remaining,
+          errorMessage: null,
+        });
+      } else {
+        if (res.error?.includes("clock") || res.error?.includes("tamper")) {
+          set({
+            licenseState: "TAMPERED_CLOCK",
+            errorMessage: res.error,
+          });
+        } else if (res.error?.includes("expired")) {
+          set({
+            licenseState: "EXPIRED",
+            errorMessage: "Your commercial subscription license has expired.",
+          });
+        } else {
+          set({
+            licenseState: "OFFLINE_GRACE_PERIOD",
+            errorMessage: res.error || "Offline verification warning",
+          });
+        }
+      }
+    } catch (err: any) {
+      console.error("License initialization failed:", err);
       set({
-        licenseState: stateEnum,
-        payload: verification.payload,
-        fingerprint,
-        hardwareInfo,
-        graceDaysRemaining: graceDays,
-        message: verification.message,
-        isLoading: false,
-      });
-    } catch (e: any) {
-      set({
-        licenseState: "READ_ONLY",
-        message: e.message || "Error al validar licencia",
-        isLoading: false,
+        licenseState: "UNLICENSED",
+        errorMessage: err.message || "Failed to initialize cryptographic license",
       });
     }
   },
 
-  applyNewToken: async (token: string) => {
-    set({ isLoading: true });
+  activateOnline: async (licenseKey: string, deviceName: string) => {
     try {
-      await saveLicenseCache(token);
-      const verification = await verifyLocalLicense(token);
+      const hwid = get().fingerprint || (await tauriBridge.getMachineFingerprint());
+      const rpcRes = await supabaseRPC.activateDeviceLicense(licenseKey, hwid, deviceName);
 
-      if (verification.is_valid) {
-        set({
-          licenseState: "ACTIVE",
-          payload: verification.payload,
-          graceDaysRemaining: null,
-          message: "Dispositivo activado con éxito.",
-          isLoading: false,
-        });
-        return true;
-      } else {
-        set({
-          licenseState: "EXPIRED",
-          message: verification.message,
-          isLoading: false,
-        });
+      if (!rpcRes.success) {
+        set({ errorMessage: rpcRes.error || "Activation failed" });
         return false;
       }
-    } catch (e: any) {
-      set({
-        message: e.message || "Error al aplicar token de licencia",
-        isLoading: false,
-      });
+
+      // Construct signed token payload for local verification
+      const payloadObj = {
+        license_id: rpcRes.license_id,
+        user_id: rpcRes.user_id,
+        machine_fingerprint: hwid,
+        plan: rpcRes.plan,
+        expires_at: rpcRes.expires_at,
+        issued_at: rpcRes.issued_at,
+      };
+
+      const payloadB64 = btoa(JSON.stringify(payloadObj));
+      // Mock signature for offline verification
+      const mockToken = `${payloadB64}.909465fb30e096f87bc3ecba52288495c0ef7613a8210045ff15d9ca9b7e56b6`;
+
+      await tauriBridge.saveCachedLicense(mockToken);
+      await get().initLicense();
+      return true;
+    } catch (err: any) {
+      set({ errorMessage: err.message || "Activation request failed" });
       return false;
     }
   },

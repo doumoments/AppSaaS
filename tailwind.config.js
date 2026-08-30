@@ -4,22 +4,24 @@ export default {
     "./index.html",
     "./src/**/*.{js,ts,jsx,tsx}",
   ],
-  darkMode: 'class',
+  darkMode: "class",
   theme: {
     extend: {
       colors: {
-        background: '#090d16',
-        surface: '#111827',
-        surfaceBorder: '#1f293d',
-        primary: {
-          50: '#eef2ff',
-          100: '#e0e7ff',
-          400: '#818cf8',
-          500: '#6366f1',
-          600: '#4f46e5',
-          700: '#4338ca',
-        }
-      }
+        background: "#090d16",
+        surface: "#0f172a",
+        surfaceCard: "#131f37",
+        surfaceBorder: "#1e293b",
+        cyberCyan: "#06b6d4",
+        cyberEmerald: "#10b981",
+        cyberRose: "#f43f5e",
+        cyberAmber: "#f59e0b",
+        cyberPurple: "#8b5cf6",
+      },
+      fontFamily: {
+        sans: ["Inter", "system-ui", "sans-serif"],
+        mono: ["JetBrains Mono", "Fira Code", "monospace"],
+      },
     },
   },
   plugins: [],

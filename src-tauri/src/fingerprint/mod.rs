@@ -4,79 +4,48 @@
 use sha2::{Digest, Sha256};
 use sysinfo::System;
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct HardwareInfo {
-    pub hostname: String,
-    pub os_name: String,
-    pub os_version: String,
-    pub cpu_brand: String,
-    pub cpu_core_count: usize,
-    pub total_memory_mb: u64,
-    pub machine_fingerprint: String,
-}
+pub struct HardwareFingerprint;
 
-/// Generates a unique, deterministic SHA-256 hardware fingerprint based on system identity
-pub fn generate_machine_fingerprint() -> String {
-    let mut sys = System::new_all();
-    sys.refresh_all();
+impl HardwareFingerprint {
+    /// Generates a deterministic SHA-256 fingerprint from immutable hardware identifiers
+    pub fn get() -> String {
+        let mut sys = System::new_all();
+        sys.refresh_all();
 
-    let hostname = System::host_name().unwrap_or_else(|| "unknown-host".to_string());
-    let os_name = System::name().unwrap_or_else(|| "windows".to_string());
-    let os_version = System::os_version().unwrap_or_else(|| "10.0".to_string());
-    
-    let cpus = sys.cpus();
-    let cpu_brand = if !cpus.is_empty() {
-        cpus[0].brand().to_string()
-    } else {
-        "generic-cpu".to_string()
-    };
-    let cpu_count = cpus.len();
-    let total_memory = sys.total_memory() / (1024 * 1024); // MB
+        let mut hasher = Sha256::new();
 
-    // Feed attributes into SHA-256 hasher
-    let mut hasher = Sha256::new();
-    hasher.update(hostname.as_bytes());
-    hasher.update(b"::");
-    hasher.update(os_name.as_bytes());
-    hasher.update(b"::");
-    hasher.update(os_version.as_bytes());
-    hasher.update(b"::");
-    hasher.update(cpu_brand.as_bytes());
-    hasher.update(b"::");
-    hasher.update(cpu_count.to_string().as_bytes());
-    hasher.update(b"::");
-    hasher.update((total_memory / 1024).to_string().as_bytes()); // rounded to GB for stability
+        // 1. Hostname / System Name
+        if let Some(host_name) = System::host_name() {
+            hasher.update(host_name.as_bytes());
+        } else {
+            hasher.update(b"default-chronos-host");
+        }
 
-    let result = hasher.finalize();
-    hex::encode(result)
-}
+        // 2. OS Version and Long Name
+        if let Some(os_name) = System::long_os_version() {
+            hasher.update(os_name.as_bytes());
+        }
 
-/// Returns full hardware diagnostics along with fingerprint
-pub fn get_hardware_diagnostics() -> HardwareInfo {
-    let mut sys = System::new_all();
-    sys.refresh_all();
+        // 3. CPU Physical IDs and Vendor Info
+        let cpus = sys.cpus();
+        if !cpus.is_empty() {
+            let cpu_brand = cpus[0].brand();
+            let cpu_vendor = cpus[0].vendor_id();
+            hasher.update(cpu_brand.as_bytes());
+            hasher.update(cpu_vendor.as_bytes());
+            hasher.update(&(cpus.len() as u32).to_le_bytes());
+        } else {
+            hasher.update(b"generic-cpu-architecture");
+        }
 
-    let hostname = System::host_name().unwrap_or_else(|| "unknown-host".to_string());
-    let os_name = System::name().unwrap_or_else(|| "windows".to_string());
-    let os_version = System::os_version().unwrap_or_else(|| "10.0".to_string());
-    
-    let cpus = sys.cpus();
-    let cpu_brand = if !cpus.is_empty() {
-        cpus[0].brand().to_string()
-    } else {
-        "generic-cpu".to_string()
-    };
-    let cpu_core_count = cpus.len();
-    let total_memory_mb = sys.total_memory() / (1024 * 1024);
-    let machine_fingerprint = generate_machine_fingerprint();
+        // 4. Total Memory rounded to nearest 512MB to avoid dynamic jitter
+        let total_mem = sys.total_memory();
+        let rounded_mem = (total_mem / (512 * 1024 * 1024)) * (512 * 1024 * 1024);
+        hasher.update(&rounded_mem.to_le_bytes());
 
-    HardwareInfo {
-        hostname,
-        os_name,
-        os_version,
-        cpu_brand,
-        cpu_core_count,
-        total_memory_mb,
-        machine_fingerprint,
+        // 5. Append static domain separator salt
+        hasher.update(b"::chronosagent-safestate-hwid-v1");
+
+        hex::encode(hasher.finalize())
     }
 }
