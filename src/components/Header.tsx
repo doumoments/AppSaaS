@@ -1,6 +1,5 @@
-// src/components/Header.tsx
 import React from "react";
-import { ShieldCheck, ShieldAlert, Cpu, Wifi, WifiOff, Sparkles } from "lucide-react";
+import { ShieldCheck, ShieldAlert, Wifi, WifiOff, Sparkles } from "lucide-react";
 import { useLicenseStore } from "../store/licenseStore";
 
 interface HeaderProps {
@@ -59,8 +58,8 @@ export const Header: React.FC<HeaderProps> = ({ onOpenActivation, onOpenSubscrip
   return (
     <header className="h-14 border-b border-surfaceBorder bg-surface/80 backdrop-blur px-4 flex items-center justify-between select-none">
       <div className="flex items-center gap-3">
-        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg shadow-indigo-500/20">
-          <Cpu className="w-4 h-4 text-white" />
+        <div className="w-8 h-8 rounded-lg overflow-hidden border border-indigo-500/30 shadow-lg shadow-indigo-500/20 flex-shrink-0">
+          <img src="/logo.jpg" alt="AppSaaS Logo" className="w-full h-full object-cover" />
         </div>
         <div>
           <h1 className="text-sm font-bold tracking-tight text-white flex items-center gap-2">
