@@ -71,7 +71,7 @@ export async function activateDeviceLicense(
 
     const clientSignedEnvelope = {
       payload: tokenPayload,
-      signature: "RPC_NATIVE_SUPABASE_SIGNED_" + Buffer.from(data.license_id).toString("base64"),
+      signature: "RPC_NATIVE_SUPABASE_SIGNED_" + btoa(data.license_id),
     };
 
     const tokenB64 = btoa(unescape(encodeURIComponent(JSON.stringify(clientSignedEnvelope))));
